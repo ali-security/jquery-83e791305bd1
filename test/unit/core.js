@@ -1103,6 +1103,72 @@ test("jQuery.extend(Object, Object)", function() {
 	deepEqual( options2, options2Copy, "Check if not modified: options2 must not be modified" );
 });
 
+test("jQuery.extend( true, ... ) Object.prototype pollution", function() {
+	expect( 3 );
+
+	var i, key, source, shallow, hasEnumerableProto,
+		hasOwn = Object.prototype.hasOwnProperty,
+		sources = [],
+		exploitable = 0,
+		shallowPolluted = 0;
+
+	// The classic vector: a parsed payload carrying a "__proto__" key.
+	sources.push( JSON.parse( "{\"__proto__\": {\"devMode\": true}}" ) );
+
+	// Not every engine leaves an own, enumerable "__proto__" key behind when
+	// parsing, so craft one explicitly as well.
+	try {
+		source = {};
+		Object.defineProperty( source, "__proto__", {
+			"value": { "devMode": true },
+			"enumerable": true,
+			"writable": true,
+			"configurable": true
+		});
+		sources.push( source );
+	} catch ( e ) {
+		// Engines refusing to redefine "__proto__" just skip this vector
+	}
+
+	// A prototype-less object has no "__proto__" setter to swallow the key.
+	try {
+		source = Object.create( null );
+		source[ "__proto__" ] = { "devMode": true };
+		sources.push( source );
+	} catch ( e2 ) {
+		// Ditto
+	}
+
+	for ( i = 0; i < sources.length; i++ ) {
+
+		// Only payloads jQuery.extend really iterates over prove anything
+		hasEnumerableProto = false;
+		for ( key in sources[ i ] ) {
+			if ( key === "__proto__" && hasOwn.call( sources[ i ], key ) ) {
+				hasEnumerableProto = true;
+			}
+		}
+
+		if ( hasEnumerableProto ) {
+			exploitable++;
+
+			jQuery.extend( true, {}, sources[ i ] );
+
+			shallow = jQuery.extend( {}, sources[ i ] );
+			if ( "devMode" in shallow ) {
+				shallowPolluted++;
+			}
+		}
+	}
+
+	ok( exploitable > 0, "At least one payload exposes an enumerable __proto__ key" );
+	ok( !( "devMode" in {} ), "Object.prototype not polluted" );
+	equal( shallowPolluted, 0, "__proto__ not copied by a shallow extend" );
+
+	// Don't let a regression here cascade into unrelated tests
+	delete Object.prototype.devMode;
+});
+
 test("jQuery.each(Object,Function)", function() {
 	expect( 23 );
 
