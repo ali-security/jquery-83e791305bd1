@@ -298,6 +298,22 @@ this.loadTests = function() {
 				require( [ dep ], loadDep );
 
 			} else {
+				// QUnit also registers QUnit.load() on the window "load" event,
+				// so it normally runs twice: once here, once when the page has
+				// finished loading. The second run rebuilds the whole #qunit
+				// report DOM and clears config.blocking. Landing in the middle
+				// of a slow asynchronous test -- the modules are pulled in with
+				// require(), so "load" can easily fire after the run started --
+				// it throws away that test's report element; QUnit dereferences
+				// the missing element as the test finishes, throws, and the run
+				// queue is left stuck forever. Calling it once, from here, is
+				// enough.
+				if ( window.removeEventListener ) {
+					window.removeEventListener( "load", QUnit.load, false );
+				} else if ( window.detachEvent ) {
+					window.detachEvent( "onload", QUnit.load );
+				}
+
 				QUnit.load();
 
 				/**

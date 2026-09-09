@@ -1341,6 +1341,54 @@ test("jQuery.parseHTML", function() {
 	equal( jQuery.parseHTML("<td><td>")[ 1 ].parentNode.nodeType, 11, "parentNode should be documentFragment" );
 });
 
+test("jQuery.parseHTML(<a href>) - gh-2965", function() {
+	expect( 1 );
+
+	var html = "<a href='test.html'></a>",
+		href = jQuery.parseHTML( html )[ 0 ].href;
+
+	ok( /\/test\.html$/.test( href ), "href is not lost after parsing anchor" );
+});
+
+// This XSS test is optional, as it can only pass where
+// document.implementation.createHTMLDocument is usable; it is missing in
+// IE8 and below and unreliable in Safari 8.
+if ( jQuery.support.createHTMLDocument ) {
+	test("jQuery.parseHTML - parses into an inert document", function() {
+		expect( 3 );
+
+		notStrictEqual( jQuery.parseHTML( "<div></div>" )[ 0 ].ownerDocument, document,
+			"Single tag is created outside of the live document" );
+		notStrictEqual( jQuery.parseHTML( "<div></div><span></span>" )[ 0 ].ownerDocument, document,
+			"Fragment is built outside of the live document" );
+		strictEqual( jQuery.parseHTML( "<div></div>", document )[ 0 ].ownerDocument, document,
+			"An explicitly passed context is still honored" );
+	});
+
+	asyncTest("jQuery.parseHTML", function() {
+		expect ( 2 );
+
+		Globals.register("parseHTMLError");
+		Globals.register("parseHTMLLiveError");
+
+		jQuery.globalEval("parseHTMLError = false; parseHTMLLiveError = false;");
+
+		// Control: the very same markup parsed against an explicit
+		// live-document context does run its handler, so the assertion below
+		// cannot pass merely because this engine never loads the image.
+		jQuery.parseHTML( "<img src=x onerror='parseHTMLLiveError = true'>", document );
+
+		jQuery.parseHTML( "<img src=x onerror='parseHTMLError = true'>" );
+
+		window.setTimeout(function() {
+			start();
+			ok( window.parseHTMLLiveError,
+				"control: onerror does fire when parsing into the live document" );
+			equal( window.parseHTMLError, false, "onerror eventhandler has not been called." );
+		}, 2000);
+	});
+}
+
 test("jQuery.parseJSON", function() {
 	expect( 20 );
 
