@@ -1,0 +1,152 @@
+# Packs the release tarball for harvesting. The test suite is NOT here: this
+# project is pre-GitHub-Actions and its CI is .travis.yml, which runs the whole
+# `grunt` suite on Node 0.10 — this workflow only reproduces the published
+# npm artifact.
+name: seal-build
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # dist/cdn/* ships inside the published tarball, but `grunt` does not
+      # produce it — upstream generated it from makeReleaseCopies() in
+      # build/release.js, which only runs under the jquery-release harness (it
+      # wants a release checkout, shelljs and push credentials). This is that
+      # one function, behaviour-for-behaviour, so the packed tarball carries the
+      # same dist/cdn members as the public 1.11.1 release. It is written out
+      # here rather than committed as a source file because the builder's patch
+      # capture only carries new files under .github/.
+      - name: Write the dist/cdn release-copy script
+        run: |
+          mkdir -p /tmp/seal-pack
+          cat > /tmp/seal-pack/cdn.js <<'CDN_EOF'
+          var fs = require( "fs" ),
+              path = require( "path" ),
+
+              version = JSON.parse(
+                  fs.readFileSync( path.join( process.cwd(), "package.json" ), "utf8" )
+              ).version,
+
+              devFile = "dist/jquery.js",
+              minFile = "dist/jquery.min.js",
+              mapFile = "dist/jquery.min.map",
+
+              cdnFolder = "dist/cdn",
+
+              releaseFiles = {
+                  "jquery-VER.js": devFile,
+                  "jquery-VER.min.js": minFile,
+                  "jquery-VER.min.map": mapFile,
+                  "jquery.js": devFile,
+                  "jquery.min.js": minFile,
+                  "jquery.min.map": mapFile,
+                  "jquery-latest.js": devFile,
+                  "jquery-latest.min.js": minFile,
+                  "jquery-latest.min.map": mapFile
+              };
+
+          if ( !fs.existsSync( cdnFolder ) ) {
+              fs.mkdirSync( cdnFolder );
+          }
+
+          Object.keys( releaseFiles ).forEach( function( key ) {
+              var text,
+                  builtFile = releaseFiles[ key ],
+                  unpathedFile = key.replace( /VER/g, version ),
+                  releaseFile = path.join( cdnFolder, unpathedFile );
+
+              if ( /\.map$/.test( releaseFile ) ) {
+
+                  // Map files need to reference the new uncompressed name;
+                  // assume that all files reside in the same directory.
+                  text = fs.readFileSync( builtFile, "utf8" )
+                      .replace( /"file":"([^"]+)","sources":\["([^"]+)"\]/,
+                          "\"file\":\"" + unpathedFile.replace( /\.min\.map/, ".min.js" ) +
+                          "\",\"sources\":[\"" + unpathedFile.replace( /\.min\.map/, ".js" ) +
+                          "\"]" );
+                  fs.writeFileSync( releaseFile, text );
+
+              } else if ( /\.min\.js$/.test( releaseFile ) ) {
+
+                  // Remove the source map comment; it causes way too many problems.
+                  text = fs.readFileSync( builtFile, "utf8" )
+                      .replace( /\/\/# sourceMappingURL=\S+/, "" );
+                  fs.writeFileSync( releaseFile, text );
+
+              } else {
+                  fs.writeFileSync( releaseFile, fs.readFileSync( builtFile ) );
+              }
+
+              console.log( "File '" + releaseFile + "' created." );
+          } );
+          CDN_EOF
+          node --version >/dev/null
+
+      # Node 0.10 is the runtime that produced the public 1.11.1 tarball, and it
+      # is far too old for actions/setup-node or for a `container:` job (the
+      # runner's node20 action host cannot start against wheezy's glibc), so the
+      # pack runs inside the era image via docker. The output goes to a host dir
+      # outside the workspace so the bind mount cannot seed a stray directory
+      # into the tree being packed.
+      - name: Pack with the release-era toolchain
+        run: |
+          docker run --rm \
+            -v "$PWD":/src:ro \
+            -v /tmp/seal-pack:/out \
+            -w /work \
+            node:0.10-wheezy \
+            sh -c '
+              set -ex
+              cp -r /src/. /work/
+
+              # This directory is our CI scaffolding, not package content, and
+              # .npmignore (which itself ships byte-identical inside the
+              # tarball) predates it, so it would otherwise be packed. Drop it
+              # from the copy being packed.
+              rm -rf /work/.github
+
+              # dist/ is committed on the release tag, so without this it would
+              # be packed exactly as jQuery shipped it in 2014 and the patched
+              # src/ would never reach the artifact -- dist/jquery.js is the
+              # package "main" and the file dist/cdn/* is copied from. These are
+              # upstream grunt tasks: "build" concatenates src/ through
+              # requirejs, "uglify" regenerates the minified file and its source
+              # map, "dist" asserts the results stay ASCII with LF endings. The
+              # lint tasks of the default target are left out on purpose -- they
+              # are gates, not build steps, and the .travis.yml leg runs the
+              # whole default target (lint included) on this same tree.
+              npm install
+              ./node_modules/.bin/grunt "build:*:*" uglify:all "dist:*"
+
+              # Installed only to run the build; npm excludes it from the pack
+              # anyway, but the published tarball predates it, so drop it and
+              # keep the packlist exactly as it was.
+              rm -rf /work/node_modules
+
+              node /out/cdn.js
+
+              # The public tarball was packed with npm 1.2.25; the image bundles
+              # npm 2.15.1, whose packlist differs, so pin it just for the pack.
+              npm install -g npm@1.2.25
+              npm pack
+
+              cp jquery-1.11.1.tgz /out/
+              chmod 644 /out/jquery-1.11.1.tgz
+            '
+
+      - name: Stage the tarball inside the workspace
+        run: |
+          mkdir -p pack-output
+          cp /tmp/seal-pack/jquery-1.11.1.tgz pack-output/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: pack-output/jquery-1.11.1.tgz
+          if-no-files-found: error

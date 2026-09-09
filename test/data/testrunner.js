@@ -16,7 +16,11 @@ var reset,
 
 // Max time for stop() and asyncTest() until it aborts test
 // and start()'s the next test.
-QUnit.config.testTimeout = 2e4; // 20 seconds
+// Raised from 20 seconds: the support module's CSP test drives an iframe plus
+// three chained HTTP requests (data/support/csp.php, csp.log, csp-clean.php),
+// which exceeds 20s under headless PhantomJS. Its late start() then corrupted
+// the following test's QUnit semaphore.
+QUnit.config.testTimeout = 1e5; // 100 seconds
 
 // Enforce an "expect" argument or expect() call in all test bodies.
 QUnit.config.requireExpects = true;

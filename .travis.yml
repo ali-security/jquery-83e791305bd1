@@ -1,3 +1,117 @@
 language: node_js
 node_js:
 - '0.10'
+before_install:
+# jQuery 1.11's unit suite is a browser QUnit harness (test/index.html) that
+# upstream ran on real browsers via TestSwarm, so `npm test` alone only covers
+# the jsonlint/build/jshint/jscs/uglify/dist pipeline. PhantomJS 1.9.8 is the
+# era's headless WebKit and the newest engine this suite is stable on (2.1.1
+# segfaults partway through the support module).
+- |
+  set -e
+  curl -sSL -o /tmp/phantomjs.tar.bz2 \
+    https://github.com/Medium/phantomjs/releases/download/v1.9.19/phantomjs-1.9.8-linux-x86_64.tar.bz2
+  tar xjf /tmp/phantomjs.tar.bz2 -C /tmp
+  sudo cp /tmp/phantomjs-1.9.8-linux-x86_64/bin/phantomjs /usr/local/bin/phantomjs
+  phantomjs --version
+# The suite's ajax and support modules drive test/data/*.php, and they only run
+# at all when the harness is served over http (test/data/testinit.js sets
+# isLocal from the page protocol, and test/unit/ajax.js returns early on
+# file://). Apache + mod_php is what the suite was written against; PHP's
+# built-in `php -S` server was tried first and made the ajax/css modules flaky
+# because it serialises the suite's parallel requests.
+- sudo apt-get update -qq
+- sudo apt-get install -y -qq apache2 libapache2-mod-php
+script:
+# Upstream's own Travis leg, unchanged: `npm test` is `grunt`, which also
+# builds dist/jquery.js that test/index.html loads.
+- npm test
+# Everything below is indented with spaces only, never tabs: these are YAML
+# block scalars, and a line starting with a tab is not valid YAML indentation.
+- |
+  set -e
+  cat > /tmp/qunit-runner.js <<'PHANTOM_EOF'
+  var page = require( "webpage" ).create(),
+      url = require( "system" ).args[ 1 ],
+      done = false,
+      summary = null;
+
+  page.onInitialized = function() {
+      page.evaluate( function() {
+          var iv = setInterval( function() {
+              if ( window.QUnit && QUnit.done ) {
+                  clearInterval( iv );
+                  QUnit.log( function( d ) {
+                      if ( !d.result ) {
+                          window.callPhantom( { t: "log",
+                              m: ( d.module || "" ) + ": " + ( d.name || "" ) +
+                                  " -- " + ( d.message || "" ) +
+                                  " expected=" + JSON.stringify( d.expected ) +
+                                  " actual=" + JSON.stringify( d.actual ) } );
+                      }
+                  } );
+                  QUnit.testDone( function( d ) {
+                      if ( d.failed === 0 ) {
+                          window.callPhantom( { t: "pass",
+                              m: ( d.module || "" ) + ": " + ( d.name || "" ) +
+                                  " (" + d.total + " assertions)" } );
+                      }
+                  } );
+                  QUnit.done( function( d ) {
+                      window.callPhantom( { t: "done", total: d.total,
+                          failed: d.failed, passed: d.passed,
+                          runtime: d.runtime } );
+                  } );
+              }
+          }, 10 );
+      } );
+  };
+  page.onCallback = function( d ) {
+      if ( d.t === "log" ) {
+          console.log( "not ok - " + d.m );
+      } else if ( d.t === "pass" ) {
+          console.log( "ok - " + d.m );
+      } else if ( d.t === "done" ) {
+          summary = d;
+          done = true;
+      }
+  };
+  page.open( url, function( status ) {
+      if ( status !== "success" ) {
+          console.log( "could not load " + url );
+          phantom.exit( 1 );
+      }
+  } );
+  setInterval( function() {
+      if ( done ) {
+          console.log( "QUnit tests: " + summary.total + " assertions, " +
+              summary.passed + " passed, " + summary.failed + " failed, " +
+              summary.runtime + "ms" );
+          phantom.exit( summary.failed > 0 ? 1 : 0 );
+      }
+  }, 200 );
+  setTimeout( function() {
+      console.log( "TIMEOUT waiting for QUnit to finish" );
+      phantom.exit( 2 );
+  }, 900000 );
+  PHANTOM_EOF
+  sudo cp -r "$TRAVIS_BUILD_DIR" /var/www/jquery
+  sudo chmod -R a+rX /var/www/jquery
+  # csp-log.php appends here when a CSP violation is reported; the support
+  # module asserts the file stays empty, so it has to be writable for that
+  # assertion to mean anything.
+  sudo chmod a+w /var/www/jquery/test/data/support/csp.log
+  sudo tee /etc/apache2/sites-available/000-default.conf >/dev/null <<'VHOST_EOF'
+  <VirtualHost *:80>
+      DocumentRoot /var/www/jquery
+      <Directory /var/www/jquery>
+          Options Indexes FollowSymLinks
+          AllowOverride None
+          Require all granted
+      </Directory>
+  </VirtualHost>
+  VHOST_EOF
+  sudo apache2ctl restart || sudo apache2ctl start
+  sleep 3
+  curl -sf -o /dev/null http://127.0.0.1/test/index.html
+  phantomjs /tmp/qunit-runner.js http://127.0.0.1/test/index.html
